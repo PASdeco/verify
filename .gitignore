@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+build/
+
+# dependencies
+*.log
+
+# env — never commit real secrets
+.env
+.env.local
+.env.*.local
+
+__pycache__/
+.pytest_cache/

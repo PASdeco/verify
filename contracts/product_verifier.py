@@ -40,6 +40,10 @@ SOURCE_APIS = (
     ("Open Food Facts", "https://world.openfoodfacts.org/api/v2/product/{code}.json"),
     ("Open Products Facts", "https://world.openproductsfacts.org/api/v2/product/{code}.json"),
     ("Open Beauty Facts", "https://world.openbeautyfacts.org/api/v2/product/{code}.json"),
+    (
+        "UPCitemdb",
+        "https://api.upcitemdb.com/prod/trial/lookup?upc={code}",
+    ),
 )
 
 MAX_BARCODE_LEN = 18
@@ -227,6 +231,36 @@ class ProductVerifier(gl.Contract):
         except Exception:
             return report
 
+        # UPCitemdb shape: {"code":"OK","total":N,"items":[{...}]}
+        if "items" in parsed:
+            if parsed.get("code") != "OK" or parsed.get("total", 0) < 1:
+                return report
+            items = parsed["items"]
+            if not isinstance(items, list) or len(items) == 0:
+                return report
+            item = items[0]
+            if not isinstance(item, dict):
+                return report
+            entry = {}
+            field_index = 0
+            fields = ("title", "brand", "model", "size", "category")
+            while field_index < len(fields):
+                key = fields[field_index]
+                value = item.get(key, "")
+                if isinstance(value, str) and len(value) > 0:
+                    entry[key] = _clamp(value, 200)
+                field_index += 1
+            offers = item.get("offers")
+            merchant_count = 0
+            if isinstance(offers, list):
+                merchant_count = len(offers)
+            if merchant_count > 0:
+                entry["merchant_listings"] = str(merchant_count)
+            report["found"] = len(entry) > 0
+            report["reported"] = entry
+            return report
+
+        # Open * Facts shape: {"status":1,"product":{...}}
         status = parsed.get("status", 0)
         product = parsed.get("product")
         if status != 1 or not isinstance(product, dict):
@@ -434,19 +468,17 @@ class ProductVerifier(gl.Contract):
         try:
             mine = self._investigate(str(theirs.get("barcode", "")))
 
-            # Source reachability/foundness is deterministic and must match
-            # exactly; verdicts tolerate one-step disagreement because
-            # independent LLM validators legitimately land on neighbouring
-            # conclusions when evidence is borderline.
             if not self._source_agreement(theirs.get("sources", []), mine.get("sources", [])):
+                return False
+
+            if not self._substantive_product_agreement(theirs, mine):
                 return False
 
             their_verdicts = self._stable_verdicts(theirs)
             my_verdicts = self._stable_verdicts(mine)
 
             # Tolerant supermajority: >= 2.5/3 judges (stored as 5 out of 6).
-            # Same rationale as sibling projects: independent studionet
-            # validators land within ~1 step of the leader on most judges.
+            # Independent validators may land within ~1 step on individual judges.
             score_x2 = self._judge_agreement_score(their_verdicts, my_verdicts)
             if score_x2 < 0:
                 return False
@@ -454,10 +486,7 @@ class ProductVerifier(gl.Contract):
                 return False
 
             if str(mine.get("verdict", "")) != str(theirs.get("verdict", "")):
-                # Final moderator verdict may differ by one step while judges
-                # still broadly agree; accept only adjacent-verdict cases.
-                if self._verdict_distance(mine.get("verdict", ""), theirs.get("verdict", "")) > 1:
-                    return False
+                return False
             return True
         except Exception:
             return False
@@ -507,6 +536,51 @@ class ProductVerifier(gl.Contract):
             index += 1
         return score_x2
 
+    def _norm(self, s: typing.Any) -> str:
+        if not isinstance(s, str):
+            return ""
+        t = s.strip().lower()
+        out = ""
+        i = 0
+        while i < len(t):
+            ch = t[i]
+            if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == " ":
+                out += ch
+            elif ch == "-" or ch == "_" or ch == "/" or ch == "." or ch == ",":
+                out += " "
+            i += 1
+        while "  " in out:
+            out = out.replace("  ", " ")
+        return out.strip()
+
+    def _field_agrees(self, a: typing.Any, b: typing.Any) -> bool:
+        na = self._norm(a)
+        nb = self._norm(b)
+        if na == nb:
+            return True
+        if len(na) == 0 and len(nb) == 0:
+            return True
+        if len(na) > 0 and len(nb) > 0:
+            if na in nb or nb in na:
+                return True
+        return False
+
+    def _reported_agrees(self, a: typing.Any, b: typing.Any) -> bool:
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        if len(a) != len(b):
+            return False
+        keys_a = list(a.keys())
+        idx = 0
+        while idx < len(keys_a):
+            k = keys_a[idx]
+            if k not in b:
+                return False
+            if not self._field_agrees(str(a.get(k, "")), str(b.get(k, ""))):
+                return False
+            idx += 1
+        return True
+
     def _source_agreement(self, a: typing.Any, b: typing.Any) -> bool:
         if not isinstance(a, list) or not isinstance(b, list):
             return False
@@ -522,7 +596,33 @@ class ProductVerifier(gl.Contract):
                 return False
             if ra.get("found") != rb.get("found"):
                 return False
+            if ra.get("found") and rb.get("found"):
+                if not self._reported_agrees(ra.get("reported", {}), rb.get("reported", {})):
+                    return False
             index += 1
+        return True
+
+    def _substantive_product_agreement(self, a: typing.Any, b: typing.Any) -> bool:
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        if str(a.get("barcode", "")) != str(b.get("barcode", "")):
+            return False
+        if not self._field_agrees(a.get("product_name", ""), b.get("product_name", "")):
+            return False
+        if not self._field_agrees(a.get("brand", ""), b.get("brand", "")):
+            return False
+        if not self._field_agrees(a.get("manufacturer", ""), b.get("manufacturer", "")):
+            return False
+        a_attr = a.get("attributes", {})
+        b_attr = b.get("attributes", {})
+        if not isinstance(a_attr, dict) or not isinstance(b_attr, dict):
+            return False
+        if not self._field_agrees(a_attr.get("quantity", ""), b_attr.get("quantity", "")):
+            return False
+        if not self._field_agrees(a_attr.get("category", ""), b_attr.get("category", "")):
+            return False
+        if not self._field_agrees(a_attr.get("notes", ""), b_attr.get("notes", "")):
+            return False
         return True
 
     # ------------------------------------------------------------------

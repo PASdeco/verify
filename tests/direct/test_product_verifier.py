@@ -68,6 +68,10 @@ def install_consistent_mocks(direct_vm):
     direct_vm.mock_web(r"https://world\.openfoodfacts\.org/.*", {"status": 200, "body": OFF_FOODS_FOUND})
     direct_vm.mock_web(r"https://world\.openproductsfacts\.org/.*", {"status": 200, "body": PRODUCTS_FOUND})
     direct_vm.mock_web(r"https://world\.openbeautyfacts\.org/.*", {"status": 200, "body": OFF_EMPTY})
+    direct_vm.mock_web(
+        r"https://api\.upcitemdb\.com/.*",
+        {"status": 200, "body": json.dumps({"code": "OK", "total": 1, "items": [{"title": "Coca-Cola Original 500ml", "brand": "Coca-Cola", "category": "Grocery"}]})},
+    )
     # Order matters (first match wins): moderator prompt embeds judge labels.
     direct_vm.mock_llm(r".*moderator.*", moderator_json("CONSISTENT"))
     direct_vm.mock_llm(r".*", judge_json("CONSISTENT"))
@@ -94,7 +98,7 @@ def test_verify_stores_full_result(direct_vm, direct_deploy, direct_alice):
     assert result["barcode"] == "5449000000996"
     assert result["verdict"] == "CONSISTENT"
     assert result["brand"] == "Coca-Cola"
-    assert len(result["sources"]) == 3
+    assert len(result["sources"]) == 4
     assert len(result["judges"]) == 3
     roles = set(result["judges"].keys())
     assert roles == {"identity", "consistency", "reliability"}

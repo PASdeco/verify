@@ -49,11 +49,14 @@ export default function ScanPage() {
       const scanner = new Html5Qrcode(SCANNER_REGION_ID, {
         formatsToSupport: undefined, // default covers EAN/UPC/Code128
         verbose: false,
+        experimentalFeatures: {
+          useBarCodeDetectorIfSupported: true, // native detector = far better 1D hit rate
+        },
       });
       scannerRef.current = scanner;
       await scanner.start(
         { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 140 } },
+        { fps: 15, qrbox: { width: 280, height: 160 }, aspectRatio: 1.3333 },
         (decoded) => onDetected(decoded),
         () => {} // per-frame miss — ignore
       );
